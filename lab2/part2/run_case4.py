@@ -4,6 +4,15 @@ from evaluate import DEFAULT_MODEL, eval_ppl_wikitext2, load_model
 from common import record_base,record_compressed,compression_rate,get_pruning_fraction
 from compression_method.prune_bitmask import apply_pruning
 
+# 1. 顯存碎片整理
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+# 2. 修復 Qwen3 與 Transformers dtype 參數相容性
+from transformers.modeling_utils import PreTrainedModel
+
+_orig_from_pretrained = PreTrainedModel.from_pretrained
+
+
 def main():
  p=argparse.ArgumentParser(description='Case 4: magnitude pruning with packed bitmask storage')
  p.add_argument('--model',default=DEFAULT_MODEL); p.add_argument('--dtype',default='float16',choices=['float16','bfloat16']); p.add_argument('--prune-fraction',type=float,default=0.20); p.add_argument('--seed',type=int,default=0)
