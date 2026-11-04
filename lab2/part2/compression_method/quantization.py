@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-GROUP_SIZE = 64
+GROUP_SIZE = 32
 _CHUNK_ELEMS = 1 << 24                      # 每塊約 1600 萬元素，控制暫存峰值
 _SHRINK = torch.linspace(1.0, 0.6, 21).tolist()   # 裁切範圍搜尋的收縮比例
 
