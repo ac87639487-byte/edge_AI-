@@ -2,7 +2,7 @@ import argparse, os, sys, torch
 ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,ROOT); sys.path.insert(0,os.path.dirname(ROOT))
 from evaluate import DEFAULT_MODEL, eval_ppl_wikitext2, load_model
 from common import record_base,record_compressed,compression_rate
-from compression.lowrank_svd import apply_svd
+from compression_method.lowrank_svd import apply_svd
 
 def main():
  p=argparse.ArgumentParser(description='Case 3: truncated-SVD Linear compression')
