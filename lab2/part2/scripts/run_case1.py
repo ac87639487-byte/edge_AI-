@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(ROOT))
 
 import torch
 from evaluate import DEFAULT_MODEL, eval_ppl_wikitext2, load_model
-from common import record_base, record_compressed, compression_rate
+from compression_rate import record_base, record_compressed, compression_rate
 from compression.quantization import quantize_model_linear_layers
 
 
