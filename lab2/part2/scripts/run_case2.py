@@ -4,7 +4,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(ROOT))
 from evaluate import DEFAULT_MODEL, eval_ppl_wikitext2, load_model
 from common import record_base, record_compressed, compression_rate
-from compression.quantization_int2 import quantize_int2
+from compression_method.quantization_int2 import quantize_int2
 
 def main():
     p=argparse.ArgumentParser(description='Case 2: packed INT2 weight-only quantization')
