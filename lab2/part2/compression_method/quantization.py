@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+_CHUNK_ELEMS = 1 << 24  //16,000,000
 
 
 def _rows_per_chunk(in_features: int) -> int:
