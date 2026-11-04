@@ -3,7 +3,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.dirname(ROOT))
 from evaluate import DEFAULT_MODEL, eval_ppl_wikitext2, load_model
-from compression_rate import record_base, record_compressed, compression_rate
+from common import record_base, record_compressed, compression_rate
 from compression.quantization_int2 import quantize_int2
 
 def main():
