@@ -108,12 +108,27 @@ class PackedInt3Linear(nn.Module):
 
 
 def quantize_model_linear_layers(model: nn.Module) -> int:
-    """Replace every nn.Linear in-place. Returns the number of replaced layers."""
+    """Replace selected nn.Linear in-place, keeping compression rate > 75%."""
+    if hasattr(model, "model") and hasattr(model.model, "layers"):
+        num_layers = len(model.model.layers)
+    elif hasattr(model, "layers"):
+        num_layers = len(model.layers)
+    else:
+        num_layers = 0
+
+    # 1. 只跳過最前面的第 0 層（不要跳過最後一層，也不要跳過 lm_head）
+    skip_layer_indices = {0} if num_layers > 0 else set()
+
     targets = []
     for module_name, module in model.named_modules():
         if isinstance(module, nn.Linear):
-            targets.append(module_name)
+            # 注意：lm_head 不跳過，必須量化，否則壓縮率會暴跌
+            is_sensitive = any(f"layers.{idx}." in module_name for idx in skip_layer_indices)
 
+            if not is_sensitive:
+                targets.append(module_name)
+
+    # 執行模組抽換
     for name in targets:
         if not name:
             raise RuntimeError("The model itself is nn.Linear; unsupported root replacement.")
@@ -121,4 +136,5 @@ def quantize_model_linear_layers(model: nn.Module) -> int:
         parent = model.get_submodule(parent_name) if parent_name else model
         old = getattr(parent, child_name)
         setattr(parent, child_name, PackedInt3Linear(old))
+
     return len(targets)
