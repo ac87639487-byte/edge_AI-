@@ -2,7 +2,7 @@ import argparse, os, sys, torch
 ROOT=os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0,ROOT); sys.path.insert(0,os.path.dirname(ROOT))
 from evaluate import DEFAULT_MODEL, eval_ppl_wikitext2, load_model
 from common import record_base,record_compressed,compression_rate,get_pruning_fraction
-from compression.prune_bitmask import apply_pruning
+from compression_method.prune_bitmask import apply_pruning
 
 def main():
  p=argparse.ArgumentParser(description='Case 4: magnitude pruning with packed bitmask storage')
