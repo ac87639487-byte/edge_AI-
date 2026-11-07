@@ -7,8 +7,9 @@ W (out x in) ~= left (out x r) @ right (r x in).
     factor of the calibration Gram matrix X^T X, so the truncation minimizes ||(W - W')X|| (SVD-LLM idea).
     Calibration data: random windows of the WikiText-2 *train* split. Layers are processed one after another,
     each seeing the outputs of the already compressed layers before it.
-  * Both factors are stored as 8-bit codes with an fp16 scale and a uint8 zero per group of GROUP values.
-    Every stored buffer is counted by common.py (the factors are Int8GroupLinear modules).
+  * Factors are stored as 8-bit codes (fp16 scale + uint8 zero per group of GROUP values) or, for a planned
+    subset of Linear layers, as plain fp16. The subset is chosen so that the overall compression rate lands
+    just above OVERALL_TARGET (the assignment fixes it at 50%). Every stored buffer is counted by common.py.
 Engine helpers (calibration data, Hessian accumulation) come from quantization_int2.py.
 """
 import torch
@@ -20,6 +21,7 @@ from compression_method.quantization_int2 import (
 
 SVD_SAVING = 0.205      # every Linear saves at least this fraction of its weights through the SVD alone
 GROUP = 64              # quantization group size; ranks are multiples of this
+OVERALL_TARGET = 0.5002  # overall compression rate (common.py) to land on, just above the required 50%
 PERCDAMP = 1e-4         # relative damping of the Gram matrix before the Cholesky factorization
 
 
@@ -85,6 +87,27 @@ class SVDInt8Linear(nn.Module):
         return self.left(self.right(x))
 
 
+class LowRankFP16Linear(nn.Module):
+    """Plain fp16 factors; common.py counts left + right for the _is_lowrank_linear flag."""
+    _is_lowrank_linear = True
+    _is_svd_int8_linear = True      # marks "SVD module" for svd_param_saving
+
+    def __init__(self, left, right, bias=None):
+        super().__init__()
+        self.register_buffer("left", left.contiguous(), persistent=True)     # (out, r)
+        self.register_buffer("right", right.contiguous(), persistent=True)   # (r, in)
+        self.in_features, self.out_features = right.shape[1], left.shape[0]
+        self.rank = right.shape[0]
+        if bias is None:
+            self.register_parameter("bias", None)
+        else:
+            self.bias = nn.Parameter(bias.detach().clone(), requires_grad=False)
+
+    def forward(self, x):
+        y = F.linear(x, self.right.to(x.dtype))
+        return F.linear(y, self.left.to(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
+
+
 # ----------------------------------------------------------------------------- whitened SVD
 @torch.no_grad()
 def _svd_factors(W, H, r, percdamp=PERCDAMP):
@@ -130,23 +153,62 @@ def _rank_for(in_f, out_f, rank_fraction, svd_saving):
     return max(GROUP, min(r // GROUP * GROUP, min(in_f, out_f) // GROUP * GROUP))
 
 
-def _compress(W, H, r):
-    """-> (right_q, left_q, dense approximation built from the *quantized* factors)."""
+def _compress(W, H, r, fp16):
+    """-> (right, left, dense approximation built from the *stored* factors).
+    right / left are (codes, scales, zeros) for int8 storage, or plain fp16 tensors when fp16=True."""
     left, right = _svd_factors(W, H, r)
+    if fp16:
+        lh, rh = left.half(), right.half()
+        return rh, lh, lh.float() @ rh.float()
     lq, rq = _quant8(left), _quant8(right)
-    dense = _deq8(*lq) @ _deq8(*rq)
-    return rq, lq, dense
+    return rq, lq, _deq8(*lq) @ _deq8(*rq)
 
 
 def _make_module(in_f, out_f, rq, lq, bias):
+    if torch.is_tensor(rq):                      # fp16 factors
+        return LowRankFP16Linear(lq, rq, bias)
     right = Int8GroupLinear(in_f, rq[0].shape[0], rq[0], rq[1], rq[2])
     left = Int8GroupLinear(lq[0].shape[1], out_f, lq[0], lq[1], lq[2], bias)
     return SVDInt8Linear(right, left)
 
 
+_STEPS = [["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+          ["self_attn.o_proj"],
+          ["mlp.gate_proj", "mlp.up_proj"],
+          ["mlp.down_proj"]]
+
+
+def _plan_fp16(model, rank_fraction, svd_saving, target):
+    """Start with every factor pair stored as int8; walk the Linear layers in order (first layers first,
+    lm_head last) and switch a module to fp16 whenever the overall compression rate stays >= target."""
+    mods = []
+    for li, layer in enumerate(model.model.layers):
+        for paths in _STEPS:
+            for p in paths:
+                m = _get(layer, p)
+                mods.append((f"{li}.{p}", m.in_features, m.out_features))
+    mods.append(("lm_head", model.lm_head.in_features, model.lm_head.out_features))
+    base = 16.0 * sum(i * o for _, i, o in mods)
+    int8_b, fp16_b = {}, {}
+    for key, i, o in mods:
+        n_el = _rank_for(i, o, rank_fraction, svd_saving) * (i + o)
+        int8_b[key] = n_el * (8 + 24 / GROUP)
+        fp16_b[key] = n_el * 16.0
+    total = sum(int8_b.values())
+    chosen = set()
+    for key, _, _ in mods:
+        new_total = total - int8_b[key] + fp16_b[key]
+        if 1.0 - new_total / base >= target:
+            chosen.add(key)
+            total = new_total
+    print(f"[svd] fp16 factors for {len(chosen)}/{len(mods)} Linear layers; planned overall compression "
+          f"{1.0 - total / base:.2%}")
+    return chosen
+
+
 # ----------------------------------------------------------------------------- pipeline
 @torch.no_grad()
-def apply_svd(model, rank_fraction=None, svd_saving=SVD_SAVING, segs=None):
+def apply_svd(model, rank_fraction=None, svd_saving=SVD_SAVING, segs=None, target=OVERALL_TARGET):
     """Replace every nn.Linear with a whitened low-rank, int8-quantized SVDInt8Linear. Returns the count.
     rank_fraction (optional): rank = rank_fraction * min(in, out) instead of the saving-based rule."""
     dev = next(model.parameters()).device
@@ -156,6 +218,7 @@ def apply_svd(model, rank_fraction=None, svd_saving=SVD_SAVING, segs=None):
                 or "Qwen/Qwen3-4B")
         segs = _calib_segments(name, N_SAMPLES, SEQLEN)
     layers = model.model.layers
+    fp16_set = _plan_fp16(model, rank_fraction, svd_saving, target)
     n, L = segs.shape
     inps = torch.zeros(n, L, model.config.hidden_size, dtype=dtype, device=dev)
     outs = torch.zeros_like(inps)
@@ -179,14 +242,9 @@ def apply_svd(model, rank_fraction=None, svd_saving=SVD_SAVING, segs=None):
     handle.remove()
     kw = store["kw"]
 
-    steps = [["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
-             ["self_attn.o_proj"],
-             ["mlp.gate_proj", "mlp.up_proj"],
-             ["mlp.down_proj"]]
-
     for li, layer in enumerate(layers):
         stored = {}
-        for paths in steps:
+        for paths in _STEPS:
             mods = [_get(layer, p) for p in paths]
             hess = _Hess(mods[0].in_features, dev)
             hook = mods[0].register_forward_hook(lambda m, a, o, hs=hess: hs.add(a[0]))
@@ -197,7 +255,7 @@ def apply_svd(model, rank_fraction=None, svd_saving=SVD_SAVING, segs=None):
             del hess
             for p, m in zip(paths, mods):
                 r = _rank_for(m.in_features, m.out_features, rank_fraction, svd_saving)
-                rq, lq, dense = _compress(m.weight.data.float(), H, r)
+                rq, lq, dense = _compress(m.weight.data.float(), H, r, f"{li}.{p}" in fp16_set)
                 m.weight.data.copy_(dense.to(dtype))        # later steps see the compressed weights
                 stored[p] = (m.in_features, m.out_features, rq, lq, m.bias)
                 del dense
@@ -217,11 +275,11 @@ def apply_svd(model, rank_fraction=None, svd_saving=SVD_SAVING, segs=None):
     for j in range(n):
         hess.add(model.model.norm(inps[j:j + 1]))
     r = _rank_for(head.in_features, head.out_features, rank_fraction, svd_saving)
-    rq, lq, _ = _compress(head.weight.data.float(), hess.get(), r)
+    rq, lq, _ = _compress(head.weight.data.float(), hess.get(), r, "lm_head" in fp16_set)
     model.lm_head = _make_module(head.in_features, head.out_features, rq, lq, head.bias)
     del head, hess, rq, lq, inps, outs
     _empty_cache()
-    return sum(1 for m in model.modules() if isinstance(m, SVDInt8Linear))
+    return sum(1 for m in model.modules() if getattr(m, "_is_svd_int8_linear", False))
 
 
 def svd_param_saving(model):
@@ -230,7 +288,7 @@ def svd_param_saving(model):
     kept = total = 0
     worst = 1.0
     for m in model.modules():
-        if isinstance(m, SVDInt8Linear):
+        if getattr(m, "_is_svd_int8_linear", False):
             full = m.in_features * m.out_features
             used = m.rank * (m.in_features + m.out_features)
             kept += used
