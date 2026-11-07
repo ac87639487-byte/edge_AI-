@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(ROOT))
 import torch
 from evaluate import DEFAULT_MODEL, eval_ppl_wikitext2, load_model
 from common import record_base, record_compressed, compression_rate
-from compression_method.lowrank_svd import SVD_SAVING, apply_svd, svd_param_saving
+from compression_method.lowrank_svd import OVERALL_TARGET, SVD_SAVING, apply_svd, svd_param_saving
 
 
 def main():
@@ -47,6 +47,8 @@ def main():
     p.add_argument("--dtype", default="float16", choices=["float16", "bfloat16"])
     p.add_argument("--svd-saving", type=float, default=SVD_SAVING,
                    help="minimum fraction of each Linear's weights saved by the rank truncation alone")
+    p.add_argument("--overall-target", type=float, default=OVERALL_TARGET,
+                   help="overall compression rate to land on (fp16 factors are used to hit it from above)")
     p.add_argument("--rank-fraction", type=float, default=None,
                    help="optional: rank = fraction * min(in, out) instead of --svd-saving")
     p.add_argument("--seed", type=int, default=0)
@@ -56,7 +58,7 @@ def main():
     torch.manual_seed(a.seed)
     model, tok = load_model(a.model, a.dtype)
     base = record_base(model)
-    n = apply_svd(model, a.rank_fraction, a.svd_saving)
+    n = apply_svd(model, a.rank_fraction, a.svd_saving, target=a.overall_target)
     comp = record_compressed(model)
     saving, worst = svd_param_saving(model)
     print(f"Linear layers decomposed: {n}")
